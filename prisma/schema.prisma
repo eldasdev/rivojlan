@@ -1,0 +1,237 @@
+// Prisma schema for Online Courses Platform (Coursera-like)
+// Supports: Students, Authors, Admins | Courses, Modules, Quizzes, Enrollments, Reviews
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============ AUTH (NextAuth.js compatible) ============
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  emailVerified DateTime?
+  name          String?
+  image         String?
+  password      String?   // null for OAuth-only users
+  role          UserRole  @default(STUDENT)
+  username      String?   @unique
+  bio           String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  // Relations
+  accounts         Account[]
+  sessions         Session[]
+  coursesAuthored  Course[]       @relation("CourseAuthor")
+  enrollments      Enrollment[]
+  reviews          Review[]
+  notifications    Notification[]
+  passwordResets   PasswordResetToken[]
+  payoutsReceived  Payout[]      @relation("PayoutRecipient")
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token     String?
+  expires_at       Int?
+  token_type       String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// Password reset tokens for "forgot password" flow
+model PasswordResetToken {
+  id        String   @id @default(cuid())
+  token     String   @unique
+  userId    String
+  expiresAt DateTime
+  used      Boolean  @default(false)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+enum UserRole {
+  STUDENT
+  AUTHOR
+  ADMIN
+}
+
+// ============ COURSES ============
+model Course {
+  id          String        @id @default(cuid())
+  title       String
+  slug        String        @unique
+  description String?
+  longDescription String?    @map("long_description") // Rich text / markdown
+  thumbnail   String?
+  status      CourseStatus  @default(DRAFT)
+  isPaid      Boolean       @default(false)
+  price       Decimal?      @db.Decimal(10, 2) // null = free
+  category    String?
+  level       String?       // beginner, intermediate, advanced
+  duration    Int?          // estimated hours
+  authorId    String
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+  publishedAt DateTime?
+
+  author     User          @relation("CourseAuthor", fields: [authorId], references: [id], onDelete: Cascade)
+  modules    Module[]
+  enrollments Enrollment[]
+  reviews    Review[]
+
+  @@index([authorId])
+  @@index([status])
+  @@index([category])
+}
+
+enum CourseStatus {
+  DRAFT
+  PENDING   // awaiting admin approval
+  PUBLISHED
+  REJECTED
+}
+
+model Module {
+  id        String   @id @default(cuid())
+  courseId  String
+  title     String
+  content   Json?    // Mixed: text, video embeds (YouTube/Vimeo URLs), file refs
+  order     Int      @default(0)
+  duration  Int?     // minutes
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  course Course @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  quiz   Quiz?
+}
+
+model Quiz {
+  id        String   @id @default(cuid())
+  moduleId  String   @unique
+  title     String?
+  questions Json     // Array of { question, options[], correctIndex }
+  passingScore Int?  @default(70) // percentage
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  module Module @relation(fields: [moduleId], references: [id], onDelete: Cascade)
+}
+
+// ============ ENROLLMENTS & PROGRESS ============
+model Enrollment {
+  id          String    @id @default(cuid())
+  userId      String
+  courseId    String
+  progress    Int       @default(0) // 0-100
+  completedAt DateTime?
+  enrolledAt  DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  course Course @relation(fields: [courseId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, courseId])
+  @@index([userId])
+  @@index([courseId])
+}
+
+// Track which modules a student has completed (for progress calculation)
+model ModuleCompletion {
+  id          String   @id @default(cuid())
+  userId      String
+  moduleId    String
+  completedAt DateTime @default(now())
+
+  @@unique([userId, moduleId])
+  @@index([userId])
+  @@index([moduleId])
+}
+
+// ============ REVIEWS ============
+model Review {
+  id        String   @id @default(cuid())
+  courseId  String
+  userId    String
+  rating    Int      // 1-5
+  comment   String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  course Course @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([courseId, userId])
+  @@index([courseId])
+}
+
+// ============ PAYOUTS (admin-recorded payouts to authors) ============
+model Payout {
+  id        String   @id @default(cuid())
+  authorId  String
+  amount    Decimal  @db.Decimal(10, 2)
+  note      String?
+  status    String   @default("completed") // completed, pending, failed
+  paidAt    DateTime @default(now())
+  createdAt DateTime @default(now())
+
+  author User @relation("PayoutRecipient", fields: [authorId], references: [id], onDelete: Cascade)
+
+  @@index([authorId])
+  @@index([paidAt])
+}
+
+// ============ PLATFORM SETTINGS (admin-configured key/value) ============
+model Setting {
+  id    String @id @default(cuid())
+  key   String @unique
+  value String
+}
+
+// ============ NOTIFICATIONS ============
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  type      String   // enrollment, course_update, review, etc.
+  title     String
+  message   String?
+  link      String?
+  read      Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
